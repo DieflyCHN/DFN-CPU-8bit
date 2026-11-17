@@ -12,6 +12,8 @@ HLT_WORD = 0xC000
 WORDS_PER_ROW = 16
 REGS = {f"R{i}": i for i in range(4)}
 ALU_OPS = {"ADD": 0, "SUB": 1, "AND": 2, "OR": 3}
+IMM_ALU_OPS = {"ADDI": 0, "SUBI": 1, "ANDI": 2, "ORI": 3}
+JUMP_OPS = {"JMP": 0xD000, "JZ": 0xE000, "JNZ": 0xF000}
 
 
 @dataclass(frozen=True)
@@ -60,14 +62,11 @@ def assemble_line(line: str) -> int:
     if op == "HLT":
         operands(0, "HLT")
         return HLT_WORD
-    if op == "JMP":
-        operands(1, "JMP Addr（0x000–0xFFF）")
-        return 0xD000 | parse_number(parts[1], 0, RAM_SIZE - 1, "跳转地址")
-    if op == "NOP" and len(parts) == 1:
-        return 0x8000
+    if op in JUMP_OPS:
+        operands(1, f"{op} Addr（0x000–0xFFF，绝对地址）")
+        return JUMP_OPS[op] | parse_number(parts[1], 0, RAM_SIZE - 1, "跳转地址")
     if op in ("READ", "NOP"):
-        operands(2, f"{op} Ra, Rb")
-        return 0x8000 | (parse_reg(parts[1]) << 8) | (parse_reg(parts[2]) << 6)
+        raise ValueError(f"{op} 已取消，原 TYPE=10 编码现用于立即数运算")
     if op == "LDI":
         operands(2, "LDI Rd, imm8")
         return 0x4000 | (parse_reg(parts[1]) << 10) | parse_imm8(parts[2])
@@ -79,6 +78,11 @@ def assemble_line(line: str) -> int:
         operands(3, f"{op} Rd, Ra, Rb")
         rd, ra, rb = (parse_reg(token) for token in parts[1:])
         return (ALU_OPS[op] << 12) | (rd << 10) | (ra << 8) | (rb << 6)
+    if op in IMM_ALU_OPS:
+        operands(3, f"{op} Rd, Ra, imm8")
+        rd, ra = parse_reg(parts[1]), parse_reg(parts[2])
+        imm = parse_imm8(parts[3])
+        return 0x8000 | (IMM_ALU_OPS[op] << 12) | (rd << 10) | (ra << 8) | imm
     if op in (".WORD", "WORD"):
         operands(1, "WORD 0x1234")
         return parse_number(parts[1], 0, WORD_MASK, "机器码")
@@ -95,14 +99,14 @@ def word_to_asm_hint(word: int) -> str:
     elif typ == 1:
         hint = f"LDI R{wa}, {word & 0xFF}"
     elif typ == 2:
-        hint = "NOP" if word == 0x8000 else f"READ R{ra}, R{rb}"
+        name = ("ADDI", "SUBI", "ANDI", "ORI")[op]
+        hint = f"{name} R{wa}, R{ra}, {word & 0xFF}"
     elif op == 0:
         hint = "HLT"
-    elif op == 1:
-        hint = f"JMP 0x{word & 0xFFF:03X}"
     else:
-        return f"WORD 0x{word:04X}"
-    # 非标准编码及未实现指令保留为 WORD，确保显示内容可还原原机器码。
+        name = ("HLT", "JMP", "JZ", "JNZ")[op]
+        hint = f"{name} 0x{word & 0xFFF:03X}"
+    # 非标准编码保留为 WORD，确保显示内容可还原原机器码。
     return hint if assemble_line(hint) == word else f"WORD 0x{word:04X}"
 
 
@@ -146,14 +150,20 @@ def print_help() -> None:
         "  SUB  Rd, Ra, Rb    减法：Rd = Ra - Rb\n"
         "  AND  Rd, Ra, Rb    按位与：Rd = Ra & Rb\n"
         "  OR   Rd, Ra, Rb    按位或：Rd = Ra | Rb\n"
+        "  ADDI Rd, Ra, 数值  立即数加法：Rd = Ra + IMM8\n"
+        "  SUBI Rd, Ra, 数值  立即数减法：Rd = Ra - IMM8\n"
+        "  ANDI Rd, Ra, 数值  立即数按位与：Rd = Ra & IMM8\n"
+        "  ORI  Rd, Ra, 数值  立即数按位或：Rd = Ra | IMM8\n"
         "  MOV  Rd, Rs        复制：Rd = Rs（使用 OR 实现）\n"
-        "  READ Ra, Rb        读取两个寄存器\n"
         "  JMP  地址          跳转到指定字地址，范围 0x000–0xFFF\n"
-        "  NOP               空操作\n"
+        "  JZ   地址          已保存的 Z=1 时跳转，否则执行下一条\n"
+        "  JNZ  地址          已保存的 Z=0 时跳转，否则执行下一条\n"
         "  HLT               停机\n"
         "  WORD 0x1234       直接写入一个 16 位机器码\n"
         "\n输入规则：\n"
         "  寄存器为 R0–R3；数值支持十进制、0x 十六进制、0b 二进制。\n"
+        "  立即数范围 -128–255，负数按 8 位补码编码；跳转只接受绝对地址，不支持标签。\n"
+        "  ALU 指令（含 MOV）更新 Z/N/C/V；LDI 和控制流指令保持标志。READ、NOP 已取消。\n"
         "  大小写不限，逗号可省略；; 或 # 后为注释。提示符显示下一条指令地址。\n"
         "\n交互命令：\n"
         "  /start            清空程序，从 0x000 重新编写\n"
